@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Head from 'next/head'
 import ImageUpload from '@/components/ImageUpload'
 import SearchResults from '@/components/SearchResults'
+import ModelSelector from '@/components/ModelSelector'
 
 interface SearchResult {
   score: number
@@ -11,6 +12,7 @@ interface SearchResult {
 interface SearchResponse {
   caption: string
   results: SearchResult[]
+  embedding_model: string
 }
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -22,6 +24,8 @@ export default function TattooSearch() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [hasSearched, setHasSearched] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<string>('clip')
+  const [usedModel, setUsedModel] = useState<string>('')
 
   const handleImageSelect = (file: File | null) => {
     setSelectedImage(file)
@@ -30,6 +34,7 @@ export default function TattooSearch() {
       setCaption('')
       setError('')
       setHasSearched(false)
+      setUsedModel('')
     }
   }
 
@@ -48,7 +53,8 @@ export default function TattooSearch() {
       const formData = new FormData()
       formData.append('file', selectedImage)
 
-      const response = await fetch(`${BACKEND_URL}/search`, {
+      const searchUrl = `${BACKEND_URL}/search?embedding_model=${encodeURIComponent(selectedModel)}`
+      const response = await fetch(searchUrl, {
         method: 'POST',
         body: formData,
       })
@@ -60,6 +66,7 @@ export default function TattooSearch() {
       const data: SearchResponse = await response.json()
       setResults(data.results)
       setCaption(data.caption)
+      setUsedModel(data.embedding_model)
       setHasSearched(true)
 
       if (data.results.length === 0) {
@@ -108,6 +115,17 @@ export default function TattooSearch() {
               isLoading={isLoading}
             />
           </div>
+
+          {/* Model Selection */}
+          {selectedImage && (
+            <div className="mb-8 max-w-md mx-auto">
+              <ModelSelector
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+                disabled={isLoading}
+              />
+            </div>
+          )}
 
           {/* Search Button */}
           {selectedImage && (
@@ -188,6 +206,7 @@ export default function TattooSearch() {
             results={results}
             caption={caption}
             isLoading={isLoading}
+            embeddingModel={usedModel}
           />
 
           {/* Instructions */}

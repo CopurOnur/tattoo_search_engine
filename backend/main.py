@@ -6,19 +6,19 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-import open_clip
 import requests
 import torch
 import torch.nn.functional as F
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import InferenceClient
 from PIL import Image
 from search_engines import SearchEngineManager
 from utils import SearchCache, URLValidator
+from embeddings import EmbeddingModelFactory, EmbeddingModel, get_default_model_configs
 
 # Load environment variables from .env file
 load_dotenv()
@@ -43,7 +43,7 @@ app.add_middleware(
 
 
 class TattooSearchEngine:
-    def __init__(self):
+    def __init__(self, embedding_model_type: str = "clip"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
 
@@ -56,13 +56,12 @@ class TattooSearchEngine:
         self.vlm_model = "zai-org/GLM-4.5V"
         logger.info(f"Using VLM model: {self.vlm_model}")
 
-        # Load CLIP for similarity
-        logger.info("Loading CLIP model...")
-        self.clip_model, _, self.clip_preprocess = (
-            open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
+        # Load embedding model
+        logger.info(f"Loading embedding model: {embedding_model_type}")
+        self.embedding_model = EmbeddingModelFactory.create_model(
+            embedding_model_type, self.device
         )
-        self.clip_model.to(self.device)
-        self.clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        logger.info(f"Using embedding model: {self.embedding_model.get_model_name()}")
 
         # Initialize new search system
         logger.info("Initializing search system...")
@@ -264,15 +263,8 @@ class TattooSearchEngine:
             return None
 
         try:
-            candidate_input = (
-                self.clip_preprocess(candidate_image).unsqueeze(0).to(self.device)
-            )
-
-            with torch.no_grad():
-                candidate_features = self.clip_model.encode_image(candidate_input)
-                candidate_features = F.normalize(candidate_features, p=2, dim=1)
-
-                similarity = torch.mm(query_features, candidate_features.T).item()
+            candidate_features = self.embedding_model.encode_image(candidate_image)
+            similarity = self.embedding_model.compute_similarity(query_features, candidate_features)
 
             return {"score": float(similarity), "url": url}
 
@@ -280,15 +272,11 @@ class TattooSearchEngine:
             logger.warning(f"Error processing candidate image {url}: {e}")
             return None
 
-    def compute_clip_similarity(
+    def compute_similarity(
         self, query_image: Image.Image, candidate_urls: List[str]
     ) -> List[Dict[str, Any]]:
-        # Encode query image
-        query_input = self.clip_preprocess(query_image).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            query_features = self.clip_model.encode_image(query_input)
-            query_features = F.normalize(query_features, p=2, dim=1)
+        # Encode query image using the selected embedding model
+        query_features = self.embedding_model.encode_image(query_image)
 
         results = []
 
@@ -333,41 +321,77 @@ class TattooSearchEngine:
         return results[:15]  # Return top 5
 
 
-# Initialize the search engine
-search_engine = TattooSearchEngine()
+# Global variable to store search engine instance
+search_engine = None
+
+def get_search_engine(embedding_model: str = "clip") -> TattooSearchEngine:
+    """Get or create search engine instance with specified embedding model."""
+    global search_engine
+    if search_engine is None or search_engine.embedding_model.get_model_name().lower() != embedding_model:
+        search_engine = TattooSearchEngine(embedding_model)
+    return search_engine
 
 
 @app.post("/search")
-async def search_tattoos(file: UploadFile = File(...)):
+async def search_tattoos(
+    file: UploadFile = File(...),
+    embedding_model: str = Query(default="clip", description="Embedding model to use (clip, dinov2, siglip)")
+):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
+        # Validate embedding model
+        available_models = EmbeddingModelFactory.get_available_models()
+        if embedding_model not in available_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid embedding model. Available: {available_models}"
+            )
+
+        # Get search engine with specified embedding model
+        engine = get_search_engine(embedding_model)
+
         # Read and process the uploaded image
         image_data = await file.read()
         query_image = Image.open(io.BytesIO(image_data)).convert("RGB")
 
         # Generate caption
         logger.info("Generating caption...")
-        caption = search_engine.generate_caption(query_image)
+        caption = engine.generate_caption(query_image)
         logger.info(f"Generated caption: {caption}")
 
         # Search for candidate images
         logger.info("Searching for candidate images...")
-        candidate_urls = search_engine.search_images(caption, max_results=100)
+        candidate_urls = engine.search_images(caption, max_results=100)
 
         if not candidate_urls:
-            return {"caption": caption, "results": []}
+            return {"caption": caption, "results": [], "embedding_model": engine.embedding_model.get_model_name()}
 
         # Compute similarities and rank
         logger.info("Computing similarities...")
-        results = search_engine.compute_clip_similarity(query_image, candidate_urls)
+        results = engine.compute_similarity(query_image, candidate_urls)
 
-        return {"caption": caption, "results": results}
+        return {
+            "caption": caption,
+            "results": results,
+            "embedding_model": engine.embedding_model.get_model_name()
+        }
 
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models")
+async def get_available_models():
+    """Get list of available embedding models and their configurations."""
+    models = EmbeddingModelFactory.get_available_models()
+    configs = get_default_model_configs()
+    return {
+        "available_models": models,
+        "model_configs": configs
+    }
 
 
 @app.get("/health")

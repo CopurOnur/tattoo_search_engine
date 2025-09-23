@@ -10,12 +10,14 @@ interface SearchResultsProps {
   results: SearchResult[]
   caption: string
   isLoading: boolean
+  embeddingModel?: string
 }
 
 export default function SearchResults({
   results,
   caption,
-  isLoading
+  isLoading,
+  embeddingModel
 }: SearchResultsProps) {
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
 
@@ -52,9 +54,16 @@ export default function SearchResults({
         <h2 className="text-xl font-semibold text-gray-800 mb-2">
           Search Results
         </h2>
-        <p className="text-gray-600 bg-gray-50 px-4 py-2 rounded-lg">
-          <span className="font-medium">AI Caption:</span> "{caption}"
-        </p>
+        <div className="space-y-2">
+          <p className="text-gray-600 bg-gray-50 px-4 py-2 rounded-lg">
+            <span className="font-medium">AI Caption:</span> "{caption}"
+          </p>
+          {embeddingModel && (
+            <p className="text-sm text-gray-500 bg-blue-50 px-4 py-2 rounded-lg">
+              <span className="font-medium">Embedding Model:</span> {embeddingModel}
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Results Grid */}
