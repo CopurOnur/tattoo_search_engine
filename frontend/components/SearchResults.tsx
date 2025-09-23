@@ -1,23 +1,23 @@
 import Image from 'next/image'
 import { useState } from 'react'
-
-interface SearchResult {
-  score: number
-  url: string
-}
+import { SearchResult } from '@/types/search'
 
 interface SearchResultsProps {
   results: SearchResult[]
   caption: string
   isLoading: boolean
   embeddingModel?: string
+  patchAttentionEnabled?: boolean
+  onAnalyzeAttention?: (result: SearchResult) => void
 }
 
 export default function SearchResults({
   results,
   caption,
   isLoading,
-  embeddingModel
+  embeddingModel,
+  patchAttentionEnabled = false,
+  onAnalyzeAttention
 }: SearchResultsProps) {
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
 
@@ -67,7 +67,7 @@ export default function SearchResults({
       </div>
 
       {/* Results Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className={`grid gap-6 ${patchAttentionEnabled ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
         {results.map((result, index) => (
           <div
             key={`${result.url}-${index}`}
@@ -110,7 +110,7 @@ export default function SearchResults({
             </div>
 
             <div className="p-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center space-x-2">
                   <span className="text-sm font-medium text-gray-700">
                     Similarity:
@@ -131,28 +131,70 @@ export default function SearchResults({
                 </div>
               </div>
 
-              <a
-                href={result.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center mt-3 text-sm text-primary-600 hover:text-primary-700"
-              >
-                View original
-                <svg
-                  className="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                  xmlns="http://www.w3.org/2000/svg"
+              {/* Patch Attention Info */}
+              {result.patch_attention && (
+                <div className="mb-3 p-2 bg-purple-50 rounded border border-purple-200">
+                  <div className="text-xs font-medium text-purple-700 mb-1">
+                    Patch Analysis Available
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs text-purple-600">
+                    <div>
+                      Overall: {(result.patch_attention.overall_similarity * 100).toFixed(1)}%
+                    </div>
+                    <div>
+                      High attention: {result.patch_attention.attention_summary.high_attention_patches}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <a
+                  href={result.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center text-sm text-primary-600 hover:text-primary-700"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-                  />
-                </svg>
-              </a>
+                  View original
+                  <svg
+                    className="w-3 h-3 ml-1"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                    />
+                  </svg>
+                </a>
+
+                {/* Detailed Analysis Button */}
+                {onAnalyzeAttention && (
+                  <button
+                    onClick={() => onAnalyzeAttention(result)}
+                    className="inline-flex items-center text-sm text-purple-600 hover:text-purple-700 font-medium"
+                  >
+                    <svg
+                      className="w-3 h-3 mr-1"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+                      />
+                    </svg>
+                    Analyze
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         ))}

@@ -19,6 +19,7 @@ from PIL import Image
 from search_engines import SearchEngineManager
 from utils import SearchCache, URLValidator
 from embeddings import EmbeddingModelFactory, EmbeddingModel, get_default_model_configs
+from patch_attention import PatchAttentionAnalyzer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -255,7 +256,8 @@ class TattooSearchEngine:
         return None
 
     def download_and_process_image(
-        self, url: str, query_features: torch.Tensor
+        self, url: str, query_features: torch.Tensor, query_image: Image.Image = None,
+        include_patch_attention: bool = False
     ) -> Dict[str, Any]:
         """Download and compute similarity for a single image"""
         candidate_image = self.download_image(url)
@@ -266,14 +268,31 @@ class TattooSearchEngine:
             candidate_features = self.embedding_model.encode_image(candidate_image)
             similarity = self.embedding_model.compute_similarity(query_features, candidate_features)
 
-            return {"score": float(similarity), "url": url}
+            result = {"score": float(similarity), "url": url}
+
+            # Add patch attention analysis if requested
+            if include_patch_attention and query_image is not None:
+                try:
+                    analyzer = PatchAttentionAnalyzer(self.embedding_model)
+                    patch_data = analyzer.compute_patch_similarities(query_image, candidate_image)
+                    result["patch_attention"] = {
+                        "overall_similarity": patch_data["overall_similarity"],
+                        "query_grid_size": patch_data["query_grid_size"],
+                        "candidate_grid_size": patch_data["candidate_grid_size"],
+                        "attention_summary": analyzer.get_similarity_summary(patch_data)
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to compute patch attention for {url}: {e}")
+                    result["patch_attention"] = None
+
+            return result
 
         except Exception as e:
             logger.warning(f"Error processing candidate image {url}: {e}")
             return None
 
     def compute_similarity(
-        self, query_image: Image.Image, candidate_urls: List[str]
+        self, query_image: Image.Image, candidate_urls: List[str], include_patch_attention: bool = False
     ) -> List[Dict[str, Any]]:
         # Encode query image using the selected embedding model
         query_features = self.embedding_model.encode_image(query_image)
@@ -287,7 +306,7 @@ class TattooSearchEngine:
             # Submit all download tasks
             future_to_url = {
                 executor.submit(
-                    self.download_and_process_image, url, query_features
+                    self.download_and_process_image, url, query_features, query_image, include_patch_attention
                 ): url
                 for url in candidate_urls
             }
@@ -300,10 +319,9 @@ class TattooSearchEngine:
                     if result is not None:
                         results.append(result)
 
-                        # Stop early if we have enough good results
-                        if (
-                            len(results) >= 20
-                        ):  # Process more than needed for better ranking
+                        # Stop early if we have enough good results (unless patch attention is needed)
+                        target_count = 5 if include_patch_attention else 20
+                        if len(results) >= target_count:
                             # Cancel remaining futures
                             for remaining_future in future_to_url:
                                 remaining_future.cancel()
@@ -318,7 +336,8 @@ class TattooSearchEngine:
         # Sort by similarity score (highest first)
         results.sort(key=lambda x: x["score"], reverse=True)
 
-        return results[:15]  # Return top 5
+        final_count = 3 if include_patch_attention else 15
+        return results[:final_count]
 
 
 # Global variable to store search engine instance
@@ -335,7 +354,8 @@ def get_search_engine(embedding_model: str = "clip") -> TattooSearchEngine:
 @app.post("/search")
 async def search_tattoos(
     file: UploadFile = File(...),
-    embedding_model: str = Query(default="clip", description="Embedding model to use (clip, dinov2, siglip)")
+    embedding_model: str = Query(default="clip", description="Embedding model to use (clip, dinov2, siglip)"),
+    include_patch_attention: bool = Query(default=False, description="Include patch-level attention analysis")
 ):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -370,16 +390,88 @@ async def search_tattoos(
 
         # Compute similarities and rank
         logger.info("Computing similarities...")
-        results = engine.compute_similarity(query_image, candidate_urls)
+        results = engine.compute_similarity(query_image, candidate_urls, include_patch_attention)
 
         return {
             "caption": caption,
             "results": results,
-            "embedding_model": engine.embedding_model.get_model_name()
+            "embedding_model": engine.embedding_model.get_model_name(),
+            "patch_attention_enabled": include_patch_attention
         }
 
     except Exception as e:
         logger.error(f"Error processing request: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze-attention")
+async def analyze_patch_attention(
+    query_file: UploadFile = File(...),
+    candidate_url: str = Query(..., description="URL of the candidate image to compare"),
+    embedding_model: str = Query(default="clip", description="Embedding model to use (clip, dinov2, siglip)"),
+    include_visualizations: bool = Query(default=True, description="Include attention visualizations")
+):
+    """Analyze patch-level attention between query image and a specific candidate image."""
+    if not query_file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Query file must be an image")
+
+    try:
+        # Validate embedding model
+        available_models = EmbeddingModelFactory.get_available_models()
+        if embedding_model not in available_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid embedding model. Available: {available_models}"
+            )
+
+        # Get search engine with specified embedding model
+        engine = get_search_engine(embedding_model)
+
+        # Read query image
+        query_image_data = await query_file.read()
+        query_image = Image.open(io.BytesIO(query_image_data)).convert("RGB")
+
+        # Download candidate image
+        candidate_image = engine.download_image(candidate_url)
+        if candidate_image is None:
+            raise HTTPException(status_code=400, detail="Failed to download candidate image")
+
+        # Analyze patch attention
+        analyzer = PatchAttentionAnalyzer(engine.embedding_model)
+        similarity_data = analyzer.compute_patch_similarities(query_image, candidate_image)
+
+        result = {
+            "query_image_size": query_image.size,
+            "candidate_image_size": candidate_image.size,
+            "candidate_url": candidate_url,
+            "embedding_model": engine.embedding_model.get_model_name(),
+            "similarity_analysis": analyzer.get_similarity_summary(similarity_data),
+            "attention_matrix_shape": similarity_data['attention_matrix'].shape,
+            "top_correspondences": similarity_data['top_correspondences'][:10]  # Top 10
+        }
+
+        # Add visualizations if requested
+        if include_visualizations:
+            try:
+                attention_heatmap = analyzer.visualize_attention_heatmap(
+                    query_image, candidate_image, similarity_data
+                )
+                top_correspondences_viz = analyzer.visualize_top_correspondences(
+                    query_image, candidate_image, similarity_data
+                )
+
+                result["visualizations"] = {
+                    "attention_heatmap": f"data:image/png;base64,{attention_heatmap}",
+                    "top_correspondences": f"data:image/png;base64,{top_correspondences_viz}"
+                }
+            except Exception as e:
+                logger.warning(f"Failed to generate visualizations: {e}")
+                result["visualizations"] = None
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error analyzing patch attention: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

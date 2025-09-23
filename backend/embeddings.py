@@ -26,6 +26,24 @@ class EmbeddingModel(ABC):
         """Encode an image into feature vector."""
         pass
 
+    def encode_image_patches(self, image: Image.Image) -> torch.Tensor:
+        """Encode an image into patch-level features. Override in subclasses that support it."""
+        raise NotImplementedError("Patch-level encoding not implemented for this model")
+
+    def compute_patch_attention(self, query_patches: torch.Tensor, candidate_patches: torch.Tensor) -> torch.Tensor:
+        """Compute attention weights between query and candidate patches."""
+        # query_patches: [num_query_patches, feature_dim]
+        # candidate_patches: [num_candidate_patches, feature_dim]
+
+        # Normalize patches
+        query_patches = F.normalize(query_patches, p=2, dim=1)
+        candidate_patches = F.normalize(candidate_patches, p=2, dim=1)
+
+        # Compute attention matrix: [num_query_patches, num_candidate_patches]
+        attention_matrix = torch.mm(query_patches, candidate_patches.T)
+
+        return attention_matrix
+
     @abstractmethod
     def get_model_name(self) -> str:
         """Return the model name."""
@@ -74,6 +92,52 @@ class CLIPEmbedding(EmbeddingModel):
             return features
         except Exception as e:
             logger.error(f"Failed to encode image with CLIP: {e}")
+            raise
+
+    def encode_image_patches(self, image: Image.Image) -> torch.Tensor:
+        """Encode image patches using CLIP vision transformer."""
+        try:
+            image_input = self.preprocess(image).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                # Get patch features from CLIP vision transformer
+                vision_model = self.model.visual
+
+                # Pass through patch embedding and positional encoding
+                x = vision_model.conv1(image_input)  # shape = [*, width, grid, grid]
+                x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+                x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+
+                # Add class token and positional embeddings
+                x = torch.cat([vision_model.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)
+                x = x + vision_model.positional_embedding.to(x.dtype)
+
+                # Apply layer norm
+                x = vision_model.ln_pre(x)
+
+                x = x.permute(1, 0, 2)  # NLD -> LND
+
+                # Pass through transformer blocks
+                for block in vision_model.transformer.resblocks:
+                    x = block(x)
+
+                x = x.permute(1, 0, 2)  # LND -> NLD
+
+                # Remove class token to get only patch features
+                patch_features = x[:, 1:, :]  # [1, num_patches, feature_dim]
+                patch_features = vision_model.ln_post(patch_features)
+
+                # Apply projection if it exists
+                if vision_model.proj is not None:
+                    patch_features = patch_features @ vision_model.proj
+
+                # Normalize patch features
+                patch_features = F.normalize(patch_features, p=2, dim=-1)
+
+                return patch_features.squeeze(0)  # [num_patches, feature_dim]
+
+        except Exception as e:
+            logger.error(f"Failed to encode image patches with CLIP: {e}")
             raise
 
     def get_model_name(self) -> str:
@@ -126,6 +190,26 @@ class DINOv2Embedding(EmbeddingModel):
             return features
         except Exception as e:
             logger.error(f"Failed to encode image with DINOv2: {e}")
+            raise
+
+    def encode_image_patches(self, image: Image.Image) -> torch.Tensor:
+        """Encode image patches using DINOv2."""
+        try:
+            image_input = self.preprocess(image).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                # Get patch features from DINOv2
+                # DINOv2 forward_features returns dict with 'x_norm_patchtokens' containing patch features
+                features_dict = self.model.forward_features(image_input)
+                patch_features = features_dict['x_norm_patchtokens']  # [1, num_patches, feature_dim]
+
+                # Normalize patch features
+                patch_features = F.normalize(patch_features, p=2, dim=-1)
+
+                return patch_features.squeeze(0)  # [num_patches, feature_dim]
+
+        except Exception as e:
+            logger.error(f"Failed to encode image patches with DINOv2: {e}")
             raise
 
     def get_model_name(self) -> str:
@@ -181,6 +265,26 @@ class SigLIPEmbedding(EmbeddingModel):
             return features
         except Exception as e:
             logger.error(f"Failed to encode image with SigLIP: {e}")
+            raise
+
+    def encode_image_patches(self, image: Image.Image) -> torch.Tensor:
+        """Encode image patches using SigLIP."""
+        try:
+            inputs = self.processor(images=image, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # last_hidden_state contains patch features: [1, num_patches, feature_dim]
+                patch_features = outputs.last_hidden_state
+
+                # Normalize patch features
+                patch_features = F.normalize(patch_features, p=2, dim=-1)
+
+                return patch_features.squeeze(0)  # [num_patches, feature_dim]
+
+        except Exception as e:
+            logger.error(f"Failed to encode image patches with SigLIP: {e}")
             raise
 
     def get_model_name(self) -> str:

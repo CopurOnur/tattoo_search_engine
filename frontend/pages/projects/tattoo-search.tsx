@@ -3,17 +3,10 @@ import Head from 'next/head'
 import ImageUpload from '@/components/ImageUpload'
 import SearchResults from '@/components/SearchResults'
 import ModelSelector from '@/components/ModelSelector'
-
-interface SearchResult {
-  score: number
-  url: string
-}
-
-interface SearchResponse {
-  caption: string
-  results: SearchResult[]
-  embedding_model: string
-}
+import PatchAttentionToggle from '@/components/PatchAttentionToggle'
+import AttentionAnalysisPanel from '@/components/AttentionAnalysisPanel'
+import PatchCorrespondenceViewer from '@/components/PatchCorrespondenceViewer'
+import { SearchResult, SearchResponse, DetailedAttentionAnalysis } from '@/types/search'
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 
@@ -26,6 +19,10 @@ export default function TattooSearch() {
   const [hasSearched, setHasSearched] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>('clip')
   const [usedModel, setUsedModel] = useState<string>('')
+  const [patchAttentionEnabled, setPatchAttentionEnabled] = useState(false)
+  const [detailedAnalysis, setDetailedAnalysis] = useState<DetailedAttentionAnalysis | null>(null)
+  const [analysisLoading, setAnalysisLoading] = useState(false)
+  const [selectedResultForAnalysis, setSelectedResultForAnalysis] = useState<SearchResult | null>(null)
 
   const handleImageSelect = (file: File | null) => {
     setSelectedImage(file)
@@ -35,6 +32,8 @@ export default function TattooSearch() {
       setError('')
       setHasSearched(false)
       setUsedModel('')
+      setDetailedAnalysis(null)
+      setSelectedResultForAnalysis(null)
     }
   }
 
@@ -53,7 +52,11 @@ export default function TattooSearch() {
       const formData = new FormData()
       formData.append('file', selectedImage)
 
-      const searchUrl = `${BACKEND_URL}/search?embedding_model=${encodeURIComponent(selectedModel)}`
+      const params = new URLSearchParams({
+        embedding_model: selectedModel,
+        include_patch_attention: patchAttentionEnabled.toString()
+      })
+      const searchUrl = `${BACKEND_URL}/search?${params.toString()}`
       const response = await fetch(searchUrl, {
         method: 'POST',
         body: formData,
@@ -82,6 +85,61 @@ export default function TattooSearch() {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // Check if current model supports patch attention
+  const modelSupportsPatchAttention = (model: string) => {
+    // All current models support patch attention
+    return ['clip', 'dinov2', 'siglip'].includes(model.toLowerCase())
+  }
+
+  // Handle detailed analysis request
+  const handleDetailedAnalysis = async (result: SearchResult) => {
+    if (!selectedImage) return
+
+    setAnalysisLoading(true)
+    setSelectedResultForAnalysis(result)
+    setDetailedAnalysis(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('query_file', selectedImage)
+
+      const params = new URLSearchParams({
+        candidate_url: result.url,
+        embedding_model: selectedModel,
+        include_visualizations: 'true'
+      })
+
+      const analysisUrl = `${BACKEND_URL}/analyze-attention?${params.toString()}`
+      const response = await fetch(analysisUrl, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error(`Analysis failed: ${response.status}`)
+      }
+
+      const analysisData: DetailedAttentionAnalysis = await response.json()
+      setDetailedAnalysis(analysisData)
+
+    } catch (err) {
+      console.error('Analysis error:', err)
+      setError(
+        err instanceof Error
+          ? `Analysis failed: ${err.message}`
+          : 'Failed to analyze patch attention. Please try again.'
+      )
+    } finally {
+      setAnalysisLoading(false)
+    }
+  }
+
+  // Close detailed analysis
+  const closeDetailedAnalysis = () => {
+    setDetailedAnalysis(null)
+    setSelectedResultForAnalysis(null)
   }
 
   return (
@@ -121,8 +179,26 @@ export default function TattooSearch() {
             <div className="mb-8 max-w-md mx-auto">
               <ModelSelector
                 selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
+                onModelChange={(model) => {
+                  setSelectedModel(model)
+                  // Disable patch attention if new model doesn't support it
+                  if (!modelSupportsPatchAttention(model)) {
+                    setPatchAttentionEnabled(false)
+                  }
+                }}
                 disabled={isLoading}
+              />
+            </div>
+          )}
+
+          {/* Patch Attention Toggle */}
+          {selectedImage && (
+            <div className="mb-8 max-w-2xl mx-auto">
+              <PatchAttentionToggle
+                enabled={patchAttentionEnabled}
+                onChange={setPatchAttentionEnabled}
+                disabled={isLoading}
+                modelSupported={modelSupportsPatchAttention(selectedModel)}
               />
             </div>
           )}
@@ -207,6 +283,8 @@ export default function TattooSearch() {
             caption={caption}
             isLoading={isLoading}
             embeddingModel={usedModel}
+            patchAttentionEnabled={patchAttentionEnabled}
+            onAnalyzeAttention={patchAttentionEnabled ? handleDetailedAnalysis : undefined}
           />
 
           {/* Instructions */}
@@ -286,6 +364,62 @@ export default function TattooSearch() {
                   <p className="text-gray-600">
                     Browse through similar tattoo designs ranked by similarity score
                   </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Detailed Analysis Modal/Section */}
+          {(detailedAnalysis || analysisLoading) && selectedImage && selectedResultForAnalysis && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-lg shadow-xl max-w-7xl w-full max-h-[90vh] overflow-y-auto">
+                {/* Header */}
+                <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between">
+                  <h2 className="text-xl font-semibold text-gray-900">
+                    Detailed Patch Attention Analysis
+                  </h2>
+                  <button
+                    onClick={closeDetailedAnalysis}
+                    className="text-gray-400 hover:text-gray-600 transition-colors"
+                  >
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Content */}
+                <div className="p-6">
+                  {analysisLoading ? (
+                    <div className="text-center py-12">
+                      <div className="inline-flex items-center">
+                        <svg className="animate-spin -ml-1 mr-3 h-8 w-8 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span className="text-lg font-medium text-gray-900">
+                          Analyzing patch attention patterns...
+                        </span>
+                      </div>
+                      <p className="text-gray-500 mt-2">This may take a moment as we compute detailed correspondences.</p>
+                    </div>
+                  ) : detailedAnalysis ? (
+                    <div className="space-y-8">
+                      {/* Analysis Panel */}
+                      <AttentionAnalysisPanel analysis={detailedAnalysis} />
+
+                      {/* Patch Correspondence Viewer */}
+                      {detailedAnalysis.top_correspondences.length > 0 && (
+                        <PatchCorrespondenceViewer
+                          queryImageUrl={URL.createObjectURL(selectedImage)}
+                          candidateImageUrl={selectedResultForAnalysis.url}
+                          correspondences={detailedAnalysis.top_correspondences}
+                          queryGridSize={Math.sqrt(detailedAnalysis.similarity_analysis.query_patches_count)}
+                          candidateGridSize={Math.sqrt(detailedAnalysis.similarity_analysis.candidate_patches_count)}
+                        />
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
